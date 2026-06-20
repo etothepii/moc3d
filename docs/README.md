@@ -12,7 +12,7 @@ open the site under a sub-path:
 
     cd ..
     python3 -m http.server 8000
-    # open http://localhost:8000/moc3d/
+    # open http://localhost:8000/docs/
 
 ## Deploy to GitHub Pages
 
@@ -29,9 +29,12 @@ make every option work unchanged at `https://<user>.github.io/<repo>/`.
 
 ## Controls
 
-* Drag to orbit, scroll to zoom, right-drag to pan.
-* Vertical-exaggeration slider (default 2x), layer toggles, reset view.
-* Click the terrain to read lon / lat / elevation and the parcel under the cursor.
+* **Desktop:** drag to orbit, scroll to zoom, right-drag to pan.
+* **iPhone / touch:** one finger to rotate, pinch to zoom, two fingers to pan.
+* The **☰ menu** (top-left, closed by default) holds the vertical-exaggeration
+  slider, layer toggles (imagery / contours / parcels / buildings) and reset view.
+  Imagery is on by default; contours and parcels start off.
+* Tap/click the terrain to read lon / lat / elevation and the parcel under it.
 
 ## Data files (`data/`)
 
@@ -41,3 +44,11 @@ make every option work unchanged at `https://<user>.github.io/<repo>/`.
 * `study_area.json` — manifest (parcel ids, names, zoning, acreage, bboxes, scale).
 
 Regenerate with `generate_site.py` (idempotent).
+
+## Copyright & permitted use
+
+© Government of Bermuda. The parcel, contour, elevation and 2019 orthophoto data
+shown here are derived from Government of Bermuda planning data and remain the
+property of the Government of Bermuda. **This data must not be used for commercial
+purposes.** Provided for reference/visualisation only, with no warranty as to
+accuracy.

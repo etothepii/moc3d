@@ -1,13 +1,25 @@
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
 <title>Bermuda parcel 3D terrain</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1015;
-    font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif; color: #e8eef4; }
-  #app { position: fixed; inset: 0; }
-  #panel { position: fixed; top: 12px; left: 12px; width: 268px; max-height: calc(100% - 24px);
+    font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif; color: #e8eef4;
+    -webkit-text-size-adjust: 100%; overscroll-behavior: none; }
+  /* touch-action:none stops iOS Safari pinch/double-tap from zooming the page so
+     the gesture reaches the WebGL canvas (OrbitControls). user-select off avoids
+     accidental text selection while dragging. */
+  #app { position: fixed; inset: 0; touch-action: none;
+    -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+  canvas { touch-action: none; display: block; }
+  #burger { position: fixed; top: 12px; left: 12px; width: 44px; height: 44px; z-index: 20;
+    display: grid; place-items: center; font-size: 20px; line-height: 1; padding: 0;
+    background: rgba(16,22,30,.86); border: 1px solid rgba(255,255,255,.12); border-radius: 10px;
+    color: #e8eef4; backdrop-filter: blur(6px); }
+  #panel { position: fixed; top: 64px; left: 12px; width: 268px; max-height: calc(100% - 76px);
     overflow-y: auto; background: rgba(16,22,30,.86); border: 1px solid rgba(255,255,255,.12);
-    border-radius: 10px; padding: 14px 16px; font-size: 13px; backdrop-filter: blur(6px); }
+    border-radius: 10px; padding: 14px 16px; font-size: 13px; backdrop-filter: blur(6px);
+    display: none; }
+  #panel.open { display: block; }
   #panel h1 { font-size: 14px; margin: 0 0 8px; }
   #panel .sub { color: #9fb0c0; font-size: 11px; margin: -4px 0 10px; }
   .row { display: flex; align-items: center; justify-content: space-between; margin: 7px 0; }
@@ -22,6 +34,7 @@
   #readout { position: fixed; bottom: 12px; left: 12px; background: rgba(16,22,30,.86);
     border: 1px solid rgba(255,255,255,.12); border-radius: 8px; padding: 8px 12px;
     font-size: 12px; font-variant-numeric: tabular-nums; }
+  #panel .credit { color: #8595a5; font-size: 10.5px; line-height: 1.4; }
   #north { position: fixed; top: 14px; right: 16px; width: 56px; height: 56px; }
   #err { position: fixed; inset: 0; display: none; place-items: center; padding: 40px;
     background: #0b1015; color: #ff8080; font-family: monospace; white-space: pre-wrap; }
@@ -30,6 +43,8 @@
 
 <div id="app"></div>
 <canvas id="north" width="56" height="56"></canvas>
+
+<button id="burger" aria-label="Toggle menu">&#9776;</button>
 
 <div id="panel">
   <h1 id="title">Study area</h1>
@@ -43,8 +58,8 @@
 
   <hr>
   <div class="row"><label><input type="checkbox" id="t_img" checked> Imagery</label></div>
-  <div class="row"><label><input type="checkbox" id="t_con" checked> Contours</label></div>
-  <div class="row"><label><input type="checkbox" id="t_par" checked> Parcels</label></div>
+  <div class="row"><label><input type="checkbox" id="t_con"> Contours</label></div>
+  <div class="row"><label><input type="checkbox" id="t_par"> Parcels</label></div>
   <div class="row"><label><input type="checkbox" id="t_bld"> Buildings</label></div>
 
   <hr>
@@ -52,9 +67,13 @@
 
   <hr>
   <div class="stat" id="aoi"></div>
+
+  <hr>
+  <div class="credit">&copy; Government of Bermuda. Parcel, contour, elevation &amp;
+    2019 imagery data &mdash; not for commercial use.</div>
 </div>
 
-<div id="readout">Click the terrain to read lon / lat / elevation.</div>
+<div id="readout">Tap the terrain to read lon / lat / elevation.</div>
 <div id="err"></div>
 
 <script type="importmap">
@@ -272,11 +291,27 @@ async function main() {
   function applyVE() { group.scale.y = parseFloat(ve.value); veVal.textContent = parseFloat(ve.value).toFixed(1); }
   ve.addEventListener('input', applyVE); applyVE();
 
-  document.getElementById('t_img').addEventListener('change', e => { terrain.visible = e.target.checked; });
-  document.getElementById('t_con').addEventListener('change', e => { conGroup.visible = e.target.checked; });
-  document.getElementById('t_par').addEventListener('change', e => { parcelGroup.visible = e.target.checked; });
-  document.getElementById('t_bld').addEventListener('change', e => { bldGroup.visible = e.target.checked; });
+  // bind a checkbox to a layer's visibility AND apply its initial (default) state,
+  // so layers that start unchecked (contours, parcels, buildings) start hidden.
+  function bindLayer(id, obj) {
+    const cb = document.getElementById(id);
+    const apply = () => { obj.visible = cb.checked; };
+    cb.addEventListener('change', apply);
+    apply();
+  }
+  bindLayer('t_img', terrain);
+  bindLayer('t_con', conGroup);
+  bindLayer('t_par', parcelGroup);
+  bindLayer('t_bld', bldGroup);
   document.getElementById('reset').addEventListener('click', () => { localStorage.removeItem('bm3d_cam'); defaultPose(); });
+
+  // burger menu — panel hidden by default, toggled open
+  const burger = document.getElementById('burger'), panel = document.getElementById('panel');
+  burger.addEventListener('click', () => {
+    const open = panel.classList.toggle('open');
+    burger.innerHTML = open ? '&#10005;' : '&#9776;';   // × when open, ☰ when closed
+    burger.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
 
   // AOI readout
   if (study) {
@@ -313,8 +348,16 @@ async function main() {
     }
     return null;
   }
-  renderer.domElement.addEventListener('pointerdown', (ev) => {
-    if (ev.button !== 0) return;
+  // tap-to-identify: remember where the press started; only pick if the finger/
+  // mouse barely moved (otherwise it was an orbit/pan/pinch gesture, not a tap).
+  let downXY = null;
+  renderer.domElement.addEventListener('pointerdown', (ev) => { downXY = [ev.clientX, ev.clientY]; });
+  renderer.domElement.addEventListener('pointercancel', () => { downXY = null; });
+  renderer.domElement.addEventListener('pointerup', (ev) => {
+    if (!downXY) return;
+    const moved = Math.hypot(ev.clientX - downXY[0], ev.clientY - downXY[1]);
+    downXY = null;
+    if (moved > 8) return;            // it was a drag, not a tap
     ndc.x = (ev.clientX / innerWidth) * 2 - 1;
     ndc.y = -(ev.clientY / innerHeight) * 2 + 1;
     ray.setFromCamera(ndc, camera);
