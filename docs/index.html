@@ -1,31 +1,366 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MOC3D.FUN</title>
-  <style>
-    :root { color-scheme: dark; }
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { height: 100%; }
-    body {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: radial-gradient(circle at 50% 30%, #1b2735 0%, #090a0f 70%);
-      color: #f4f6fb;
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bermuda parcel 3D terrain</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1015;
+    font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif; color: #e8eef4; }
+  #app { position: fixed; inset: 0; }
+  #panel { position: fixed; top: 12px; left: 12px; width: 268px; max-height: calc(100% - 24px);
+    overflow-y: auto; background: rgba(16,22,30,.86); border: 1px solid rgba(255,255,255,.12);
+    border-radius: 10px; padding: 14px 16px; font-size: 13px; backdrop-filter: blur(6px); }
+  #panel h1 { font-size: 14px; margin: 0 0 8px; }
+  #panel .sub { color: #9fb0c0; font-size: 11px; margin: -4px 0 10px; }
+  .row { display: flex; align-items: center; justify-content: space-between; margin: 7px 0; }
+  .row label { cursor: pointer; }
+  input[type=range] { width: 130px; }
+  hr { border: 0; border-top: 1px solid rgba(255,255,255,.1); margin: 12px 0; }
+  button { background: #1f6feb; color: #fff; border: 0; border-radius: 6px; padding: 6px 10px;
+    cursor: pointer; font-size: 12px; }
+  button:hover { background: #2b7bf6; }
+  .stat { color: #9fb0c0; font-size: 11px; line-height: 1.5; }
+  .stat b { color: #e8eef4; font-weight: 600; }
+  #readout { position: fixed; bottom: 12px; left: 12px; background: rgba(16,22,30,.86);
+    border: 1px solid rgba(255,255,255,.12); border-radius: 8px; padding: 8px 12px;
+    font-size: 12px; font-variant-numeric: tabular-nums; }
+  #north { position: fixed; top: 14px; right: 16px; width: 56px; height: 56px; }
+  #err { position: fixed; inset: 0; display: none; place-items: center; padding: 40px;
+    background: #0b1015; color: #ff8080; font-family: monospace; white-space: pre-wrap; }
+  #ve_val { width: 34px; text-align: right; display: inline-block; }
+</style>
+
+<div id="app"></div>
+<canvas id="north" width="56" height="56"></canvas>
+
+<div id="panel">
+  <h1 id="title">Study area</h1>
+  <div class="sub" id="subtitle"></div>
+
+  <div class="row">
+    <label for="ve">Vertical exaggeration</label>
+    <span><span id="ve_val">2.0</span>&times;</span>
+  </div>
+  <div class="row"><input type="range" id="ve" min="1" max="6" step="0.5" value="2" style="width:100%"></div>
+
+  <hr>
+  <div class="row"><label><input type="checkbox" id="t_img" checked> Imagery</label></div>
+  <div class="row"><label><input type="checkbox" id="t_con" checked> Contours</label></div>
+  <div class="row"><label><input type="checkbox" id="t_par" checked> Parcels</label></div>
+  <div class="row"><label><input type="checkbox" id="t_bld"> Buildings</label></div>
+
+  <hr>
+  <div class="row"><button id="reset">Reset view</button></div>
+
+  <hr>
+  <div class="stat" id="aoi"></div>
+</div>
+
+<div id="readout">Click the terrain to read lon / lat / elevation.</div>
+<div id="err"></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "./vendor/three.module.js",
+  "three/addons/": "./vendor/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from './vendor/OrbitControls.js';
+
+const fail = (m) => { const e = document.getElementById('err');
+  e.style.display = 'grid'; e.textContent = 'Error:\n' + m; console.error(m); };
+
+async function loadBin(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('fetch ' + url + ' -> ' + r.status);
+  return new Float32Array(await r.arrayBuffer());
+}
+async function loadJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('fetch ' + url + ' -> ' + r.status);
+  return r.json();
+}
+
+// Web-Mercator -> lon/lat (degrees)
+const R = 6378137.0;
+function mercToLonLat(x, y) {
+  const lon = (x / R) * 180 / Math.PI;
+  const lat = (2 * Math.atan(Math.exp(y / R)) - Math.PI / 2) * 180 / Math.PI;
+  return [lon, lat];
+}
+
+main().catch(e => fail(e.stack || String(e)));
+
+async function main() {
+  const [dem, basemap, study] = await Promise.all([
+    loadJSON('./data/dem.json'),
+    loadJSON('./data/basemap.json').catch(() => null),
+    loadJSON('./data/study_area.json').catch(() => null),
+  ]);
+  const elev = await loadBin('./data/dem.bin');
+
+  const { nx, ny } = dem;
+  const [xmin, ymin, xmax, ymax] = dem.bbox_3857;
+  const cellx = dem.cellx_merc, celly = dem.celly_merc;
+  const scale = dem.scale_ground_per_merc;
+  const resx = cellx * scale, resy = celly * scale;   // ground metres / cell
+  const W = (nx - 1) * resx, D = (ny - 1) * resy;
+
+  // ---- coordinate helpers (local/group space, pre vertical-exaggeration) ----
+  function elevMerc(mx, my) {
+    let cf = (mx - xmin) / cellx;
+    let rf = (ymax - my) / celly;
+    cf = Math.max(0, Math.min(nx - 1, cf));
+    rf = Math.max(0, Math.min(ny - 1, rf));
+    const c0 = Math.floor(cf), r0 = Math.floor(rf);
+    const c1 = Math.min(c0 + 1, nx - 1), r1 = Math.min(r0 + 1, ny - 1);
+    const fx = cf - c0, fy = rf - r0;
+    const a = elev[r0 * nx + c0], b = elev[r0 * nx + c1];
+    const c = elev[r1 * nx + c0], d = elev[r1 * nx + c1];
+    return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
+  }
+  function mercToScene(mx, my) {
+    const cf = (mx - xmin) / cellx, rf = (ymax - my) / celly;
+    return [cf * resx - W / 2, rf * resy - D / 2];
+  }
+  function sceneToMerc(sx, sz) {
+    const cf = (sx + W / 2) / resx, rf = (sz + D / 2) / resy;
+    return [xmin + cf * cellx, ymax - rf * celly];
+  }
+  function drape(mx, my, lift) {
+    // clamp to the study bbox so overlay vertices outside the terrain footprint
+    // (neighbouring parcels / contours that merely intersect the bbox) snap to
+    // the edge instead of trailing off into empty space.
+    mx = Math.max(xmin, Math.min(xmax, mx));
+    my = Math.max(ymin, Math.min(ymax, my));
+    const [sx, sz] = mercToScene(mx, my);
+    return new THREE.Vector3(sx, elevMerc(mx, my) + (lift || 0), sz);
+  }
+
+  // ---- scene ----
+  const app = document.getElementById('app');
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  app.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b1015);
+  const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.5, 100000);
+
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.maxPolarAngle = Math.PI / 2 - 0.05;   // just under horizontal
+  controls.screenSpacePanning = false;
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x35506b, 1.15));
+
+  // group whose scale.y is the vertical exaggeration; everything draped lives here
+  const group = new THREE.Group();
+  scene.add(group);
+
+  // ---- terrain mesh ----
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(nx * ny * 3);
+  const uv = new Float32Array(nx * ny * 2);
+  for (let r = 0; r < ny; r++) {
+    for (let c = 0; c < nx; c++) {
+      const i = r * nx + c;
+      pos[i * 3]     = c * resx - W / 2;
+      pos[i * 3 + 1] = elev[i];
+      pos[i * 3 + 2] = r * resy - D / 2;
+      uv[i * 2]     = c / (nx - 1);
+      uv[i * 2 + 1] = 1 - r / (ny - 1);   // image row 0 = north = ymax
     }
-    h1 {
-      font-size: clamp(3rem, 18vw, 11rem);
-      font-weight: 800;
-      letter-spacing: 0.05em;
-      text-shadow: 0 0 40px rgba(120, 170, 255, 0.45);
+  }
+  const idx = [];
+  for (let r = 0; r < ny - 1; r++) {
+    for (let c = 0; c < nx - 1; c++) {
+      const a = r * nx + c, b = a + 1, d = a + nx, e = d + 1;
+      idx.push(a, d, b, b, d, e);
     }
-  </style>
-</head>
-<body>
-  <h1>MOC3D.FUN</h1>
-</body>
-</html>
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+
+  let material;
+  if (basemap) {
+    const tex = await new THREE.TextureLoader().loadAsync('./data/' + basemap.image);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    material = new THREE.MeshBasicMaterial({ map: tex });
+  } else {
+    material = new THREE.MeshLambertMaterial({ color: 0x6b7d5b });
+  }
+  const terrain = new THREE.Mesh(geo, material);
+  group.add(terrain);
+
+  // ---- overlays ----
+  const requested = new Set((study && study.parcels || []).map(p => String(p.PARCELID)));
+
+  function drapedLine(coords, mat, lift) {
+    const pts = coords.map(([x, y]) => drape(x, y, lift));
+    const g = new THREE.BufferGeometry().setFromPoints(pts);
+    const line = new THREE.Line(g, mat);
+    line.renderOrder = 10;
+    return line;
+  }
+
+  async function addPolygons(url, group3d, matMaker, lift) {
+    let fc;
+    try { fc = await loadJSON(url); } catch { return []; }
+    const feats = fc.features || [];
+    for (const f of feats) {
+      const rings = f.geometry.type === 'Polygon'
+        ? f.geometry.coordinates : f.geometry.coordinates.flat(1);
+      for (const ring of rings) {
+        group3d.add(drapedLine(ring, matMaker(f), lift));
+      }
+    }
+    return feats;
+  }
+
+  // parcels
+  const parcelGroup = new THREE.Group(); group.add(parcelGroup);
+  const matReq = new THREE.LineBasicMaterial({ color: 0xffd34d, depthTest: false, transparent: true });
+  const matOther = new THREE.LineBasicMaterial({ color: 0x66e0ff, depthTest: false, transparent: true, opacity: 0.55 });
+  const parcelFeats = await addPolygons('./data/parcels.geojson', parcelGroup,
+    (f) => requested.has(String(f.properties.PARCELID)) ? matReq : matOther, 0.8);
+
+  // buildings
+  const bldGroup = new THREE.Group(); bldGroup.visible = false; group.add(bldGroup);
+  const matBld = new THREE.LineBasicMaterial({ color: 0xff9b6b, depthTest: false, transparent: true, opacity: 0.8 });
+  await addPolygons('./data/buildings.geojson', bldGroup, () => matBld, 0.4);
+
+  // contours
+  const conGroup = new THREE.Group(); group.add(conGroup);
+  const matMinor = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.30 });
+  const matMajor = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.70 });
+  try {
+    const fc = await loadJSON('./data/contours.geojson');
+    for (const f of (fc.features || [])) {
+      const z = f.properties.Contour;
+      const mat = (z != null && z % 5 === 0) ? matMajor : matMinor;
+      const lines = f.geometry.type === 'LineString'
+        ? [f.geometry.coordinates] : f.geometry.coordinates;
+      for (const line of lines) conGroup.add(drapedLine(line, mat, 0.25));
+    }
+  } catch { /* no contours */ }
+
+  // ---- framing / camera ----
+  const cx = 0, cz = 0;
+  const midElev = (dem.zmin + dem.zmax) / 2;
+  const span = Math.max(W, D);
+  function defaultPose() {
+    camera.position.set(cx + span * 0.0, midElev * 2 + span * 0.6, cz + span * 0.9);
+    controls.target.set(cx, midElev, cz);
+    controls.update();
+  }
+  const saved = localStorage.getItem('bm3d_cam');
+  if (saved) {
+    try {
+      const s = JSON.parse(saved);
+      camera.position.fromArray(s.p); controls.target.fromArray(s.t); controls.update();
+    } catch { defaultPose(); }
+  } else { defaultPose(); }
+
+  // ---- UI ----
+  const ve = document.getElementById('ve'), veVal = document.getElementById('ve_val');
+  function applyVE() { group.scale.y = parseFloat(ve.value); veVal.textContent = parseFloat(ve.value).toFixed(1); }
+  ve.addEventListener('input', applyVE); applyVE();
+
+  document.getElementById('t_img').addEventListener('change', e => { terrain.visible = e.target.checked; });
+  document.getElementById('t_con').addEventListener('change', e => { conGroup.visible = e.target.checked; });
+  document.getElementById('t_par').addEventListener('change', e => { parcelGroup.visible = e.target.checked; });
+  document.getElementById('t_bld').addEventListener('change', e => { bldGroup.visible = e.target.checked; });
+  document.getElementById('reset').addEventListener('click', () => { localStorage.removeItem('bm3d_cam'); defaultPose(); });
+
+  // AOI readout
+  if (study) {
+    const ids = (study.parcels || []).map(p => p.PARCELID).join(', ');
+    document.getElementById('title').textContent = 'Parcels ' + (ids || '—');
+    const ac = (study.parcels || []).reduce((s, p) => s + (p.Acreage || 0), 0);
+    const names = [...new Set((study.parcels || []).map(p => p.LocationPropertyName).filter(Boolean))];
+    document.getElementById('subtitle').textContent = names.join(' / ');
+    document.getElementById('aoi').innerHTML =
+      'Parcels: <b>' + (study.parcels || []).length + '</b><br>' +
+      'Acreage: <b>' + ac.toFixed(2) + '</b><br>' +
+      'Elevation: <b>' + dem.zmin.toFixed(1) + '</b> – <b>' + dem.zmax.toFixed(1) + '</b> m<br>' +
+      'Radius buffer: <b>' + (study.radius_m != null ? study.radius_m + ' m' : '—') + '</b>';
+  } else {
+    document.getElementById('aoi').innerHTML =
+      'Elevation: <b>' + dem.zmin.toFixed(1) + '</b> – <b>' + dem.zmax.toFixed(1) + '</b> m';
+  }
+
+  // ---- pick: click terrain -> lon/lat/elev + parcel id ----
+  const ray = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+  function pointInRing(mx, my, ring) {
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+      if (((yi > my) !== (yj > my)) && (mx < (xj - xi) * (my - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+  }
+  function parcelAt(mx, my) {
+    for (const f of parcelFeats) {
+      const rings = f.geometry.type === 'Polygon' ? f.geometry.coordinates : f.geometry.coordinates.flat(1);
+      if (rings.length && pointInRing(mx, my, rings[0])) return f.properties.PARCELID;
+    }
+    return null;
+  }
+  renderer.domElement.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0) return;
+    ndc.x = (ev.clientX / innerWidth) * 2 - 1;
+    ndc.y = -(ev.clientY / innerHeight) * 2 + 1;
+    ray.setFromCamera(ndc, camera);
+    const hit = ray.intersectObject(terrain, false)[0];
+    if (!hit) return;
+    const [mx, my] = sceneToMerc(hit.point.x, hit.point.z);
+    const [lon, lat] = mercToLonLat(mx, my);
+    const elevation = hit.point.y / group.scale.y;
+    const pid = parcelAt(mx, my);
+    document.getElementById('readout').innerHTML =
+      'lon <b>' + lon.toFixed(6) + '</b>  lat <b>' + lat.toFixed(6) + '</b>  ' +
+      'elev <b>' + elevation.toFixed(1) + ' m</b>' + (pid ? '  parcel <b>' + pid + '</b>' : '');
+  });
+
+  // ---- north indicator ----
+  const ncv = document.getElementById('north').getContext('2d');
+  function drawNorth() {
+    // camera azimuth: scene -Z is north
+    const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+    const ang = Math.atan2(dir.x, -dir.z);  // heading; rotate arrow opposite
+    ncv.clearRect(0, 0, 56, 56);
+    ncv.save(); ncv.translate(28, 28); ncv.rotate(-ang);
+    ncv.strokeStyle = '#fff'; ncv.fillStyle = '#ff5b5b'; ncv.lineWidth = 2;
+    ncv.beginPath(); ncv.moveTo(0, -20); ncv.lineTo(7, 8); ncv.lineTo(0, 2); ncv.lineTo(-7, 8); ncv.closePath();
+    ncv.fill();
+    ncv.fillStyle = '#fff'; ncv.font = 'bold 11px sans-serif'; ncv.textAlign = 'center';
+    ncv.fillText('N', 0, -24); ncv.restore();
+  }
+
+  addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+
+  let saveT = 0;
+  function tick() {
+    requestAnimationFrame(tick);
+    controls.update();
+    drawNorth();
+    renderer.render(scene, camera);
+    if (performance.now() - saveT > 800) {
+      saveT = performance.now();
+      localStorage.setItem('bm3d_cam', JSON.stringify({
+        p: camera.position.toArray(), t: controls.target.toArray() }));
+    }
+  }
+  tick();
+}
+</script>
